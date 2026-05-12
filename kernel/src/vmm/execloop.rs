@@ -18,12 +18,24 @@ use crate::sev::vmsa::VMSAControl;
 use crate::types::GUEST_VMPL;
 
 use core::ops::DerefMut;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use cpuarch::vmsa::GuestVMExit;
 
 const GUEST_EXIT_LOG_INTERVAL_SECS: u64 = 30;
 static GUEST_EXIT_LAST_LOG_TSC: AtomicU64 = AtomicU64::new(0);
+static GUEST_ENTRY_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
+static GUEST_RETURN_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
+static TSC_HZ_LOGGED: AtomicBool = AtomicBool::new(false);
 static TSC_HZ_CACHE: AtomicU64 = AtomicU64::new(0);
+
+fn log_once_for_cpu(mask: &AtomicU64, cpu_index: usize) -> bool {
+    if cpu_index >= u64::BITS as usize {
+        return false;
+    }
+
+    let bit = 1_u64 << cpu_index;
+    (mask.fetch_or(bit, Ordering::AcqRel) & bit) == 0
+}
 
 fn tsc_hz() -> u64 {
     let cached = TSC_HZ_CACHE.load(Ordering::Relaxed);
@@ -33,9 +45,12 @@ fn tsc_hz() -> u64 {
 
     let max_leaf = SVSM_PLATFORM.cpuid(0, 0).map(|r| r.eax).unwrap_or(0);
     let mut hz = 0;
+    let mut leaf15_regs = None;
+    let mut leaf16_regs = None;
 
     if max_leaf >= 0x15 {
         if let Some(leaf) = SVSM_PLATFORM.cpuid(0x15, 0) {
+            leaf15_regs = Some((leaf.eax, leaf.ebx, leaf.ecx, leaf.edx));
             let denom = leaf.eax as u64;
             let numer = leaf.ebx as u64;
             let crystal = leaf.ecx as u64;
@@ -47,6 +62,7 @@ fn tsc_hz() -> u64 {
 
     if hz == 0 && max_leaf >= 0x16 {
         if let Some(leaf) = SVSM_PLATFORM.cpuid(0x16, 0) {
+            leaf16_regs = Some((leaf.eax, leaf.ebx, leaf.ecx, leaf.edx));
             let mhz = (leaf.eax & 0xffff) as u64;
             if mhz != 0 {
                 hz = mhz.saturating_mul(1_000_000);
@@ -56,6 +72,16 @@ fn tsc_hz() -> u64 {
 
     if hz != 0 {
         TSC_HZ_CACHE.store(hz, Ordering::Relaxed);
+    }
+
+    if !TSC_HZ_LOGGED.swap(true, Ordering::AcqRel) {
+        log::info!(
+            "guest exit debug: tsc_hz={} max_cpuid_leaf={:#x} cpuid_15={:?} cpuid_16={:?}",
+            hz,
+            max_leaf,
+            leaf15_regs,
+            leaf16_regs
+        );
     }
 
     hz
@@ -144,9 +170,11 @@ fn get_svsm_request_message(vmsa_ref: &mut GuestVmsaRef) -> Option<GuestExitMess
 
 pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
     let cpu = this_cpu();
+    let cpu_index = cpu.get_cpu_index();
 
     // If no VMSA or CAA are configured, then the guest cannot be entered.
     if cpu.update_guest_mappings().is_err() {
+        log::info!("enter_guest debug: cpu={} has no guest mappings", cpu_index);
         return GuestExitMessage::NoMappings;
     }
 
@@ -183,6 +211,14 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
 
         flush_tlb_global_sync();
 
+        if log_once_for_cpu(&GUEST_ENTRY_LOGGED_CPUS, cpu_index) {
+            log::info!(
+                "enter_guest debug: cpu={} switching to guest vmpl={}",
+                cpu_index,
+                GUEST_VMPL
+            );
+        }
+
         switch_to_vmpl(GUEST_VMPL as u32);
 
         // Interrupts can safely be reenabled once the guest has returned to the
@@ -192,6 +228,10 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
         // If no mapping exists, then indicate to the caller that the guest
         // exited with no valid mappings.
         if cpu.update_guest_mappings().is_err() {
+            log::info!(
+                "enter_guest debug: cpu={} returned without guest mappings",
+                cpu_index
+            );
             return GuestExitMessage::NoMappings;
         }
 
@@ -200,12 +240,21 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
         {
             let mut vmsa_ref = cpu.guest_vmsa_ref();
             let vmsa = vmsa_ref.vmsa();
+            let exit_code = vmsa.guest_exit_code;
+
+            if log_once_for_cpu(&GUEST_RETURN_LOGGED_CPUS, cpu_index) {
+                log::info!(
+                    "enter_guest debug: cpu={} returned from guest exit_code={:?}",
+                    cpu_index,
+                    exit_code
+                );
+            }
 
             // Clear EFER.SVME in guest VMSA.
             vmsa.disable();
 
             cpu.ai_handle_intercepts(vmsa);
-            maybe_log_guest_exit(cpu.get_cpu_index(), vmsa.guest_exit_code);
+            maybe_log_guest_exit(cpu_index, exit_code);
 
             if let Some(msg) = get_svsm_request_message(vmsa_ref.deref_mut()) {
                 return msg;
