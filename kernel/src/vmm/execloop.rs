@@ -22,6 +22,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use cpuarch::vmsa::GuestVMExit;
 
 const GUEST_EXIT_LOG_INTERVAL_SECS: u64 = 30;
+static GUEST_EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static GUEST_EXIT_LAST_LOG_TSC: AtomicU64 = AtomicU64::new(0);
 static GUEST_ENTRY_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
 static GUEST_RETURN_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
@@ -88,6 +89,16 @@ fn tsc_hz() -> u64 {
 }
 
 fn maybe_log_guest_exit(cpu_index: usize, exit_code: GuestVMExit) {
+    let count = GUEST_EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if count <= 8 || count.is_power_of_two() {
+        log::info!(
+            "guest exit debug: count={} cpu={} exit_code={:?}",
+            count,
+            cpu_index,
+            exit_code
+        );
+    }
+
     let hz = tsc_hz();
     if hz == 0 {
         return;

@@ -109,12 +109,10 @@ fn request_loop_main(cpu_index: usize) {
     set_affinity(cpu_index);
 
     log::info!("Launching request-processing task on CPU {cpu_index}");
-    log::info!("request loop debug: CPU {cpu_index} waiting for IPI block");
 
     // Suppress the use of IPIs before entering the guest, and ensure that all
     // other CPUs have done the same.
     wait_for_ipi_block();
-    log::info!("request loop debug: CPU {cpu_index} entering guest loop");
 
     let mut guest_regs = Vec::<GuestRegister>::new();
 
@@ -126,15 +124,10 @@ fn request_loop_main(cpu_index: usize) {
 
         match msg {
             GuestExitMessage::NoMappings => {
-                log::info!("request loop debug: CPU {cpu_index} has no VMSA or CAA; going idle");
+                log::debug!("No VMSA or CAA! Halting");
                 go_idle();
             }
             GuestExitMessage::Svsm((protocol, request, mut params)) => {
-                log::info!(
-                    "request loop debug: CPU {cpu_index} handling request protocol={:#x} request={:#x}",
-                    protocol,
-                    request
-                );
                 guest_regs = process_request(protocol, request, &mut params);
             }
         }
