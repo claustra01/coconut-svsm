@@ -22,11 +22,15 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use cpuarch::vmsa::GuestVMExit;
 
 const GUEST_EXIT_LOG_INTERVAL_SECS: u64 = 30;
+const KVM_CPUID_SIGNATURE: u32 = 0x4000_0000;
+const KVM_CPUID_TSC_FREQUENCY: u32 = KVM_CPUID_SIGNATURE | 0x10;
+
 static GUEST_EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static GUEST_EXIT_LAST_LOG_TSC: AtomicU64 = AtomicU64::new(0);
 static GUEST_ENTRY_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
 static GUEST_RETURN_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
 static TSC_HZ_LOGGED: AtomicBool = AtomicBool::new(false);
+static TSC_HZ_PROBED: AtomicBool = AtomicBool::new(false);
 static TSC_HZ_CACHE: AtomicU64 = AtomicU64::new(0);
 
 fn log_once_for_cpu(mask: &AtomicU64, cpu_index: usize) -> bool {
@@ -39,15 +43,19 @@ fn log_once_for_cpu(mask: &AtomicU64, cpu_index: usize) -> bool {
 }
 
 fn tsc_hz() -> u64 {
-    let cached = TSC_HZ_CACHE.load(Ordering::Relaxed);
-    if cached != 0 {
-        return cached;
+    if TSC_HZ_PROBED.load(Ordering::Acquire) {
+        return TSC_HZ_CACHE.load(Ordering::Relaxed);
     }
 
     let max_leaf = SVSM_PLATFORM.cpuid(0, 0).map(|r| r.eax).unwrap_or(0);
+    let max_hypervisor_leaf = SVSM_PLATFORM
+        .cpuid(KVM_CPUID_SIGNATURE, 0)
+        .map(|r| r.eax)
+        .unwrap_or(0);
     let mut hz = 0;
     let mut leaf15_regs = None;
     let mut leaf16_regs = None;
+    let mut leaf40000010_regs = None;
 
     if max_leaf >= 0x15 {
         if let Some(leaf) = SVSM_PLATFORM.cpuid(0x15, 0) {
@@ -71,17 +79,28 @@ fn tsc_hz() -> u64 {
         }
     }
 
-    if hz != 0 {
-        TSC_HZ_CACHE.store(hz, Ordering::Relaxed);
+    if hz == 0 && max_hypervisor_leaf >= KVM_CPUID_TSC_FREQUENCY {
+        if let Some(leaf) = SVSM_PLATFORM.cpuid(KVM_CPUID_TSC_FREQUENCY, 0) {
+            leaf40000010_regs = Some((leaf.eax, leaf.ebx, leaf.ecx, leaf.edx));
+            let khz = leaf.eax as u64;
+            if khz != 0 {
+                hz = khz.saturating_mul(1_000);
+            }
+        }
     }
+
+    TSC_HZ_CACHE.store(hz, Ordering::Relaxed);
+    TSC_HZ_PROBED.store(true, Ordering::Release);
 
     if !TSC_HZ_LOGGED.swap(true, Ordering::AcqRel) {
         log::info!(
-            "guest exit debug: tsc_hz={} max_cpuid_leaf={:#x} cpuid_15={:?} cpuid_16={:?}",
+            "guest exit heartbeat: tsc_hz={} max_cpuid_leaf={:#x} max_hypervisor_leaf={:#x} cpuid_15={:?} cpuid_16={:?} cpuid_40000010={:?}",
             hz,
             max_leaf,
+            max_hypervisor_leaf,
             leaf15_regs,
-            leaf16_regs
+            leaf16_regs,
+            leaf40000010_regs
         );
     }
 
@@ -90,17 +109,17 @@ fn tsc_hz() -> u64 {
 
 fn maybe_log_guest_exit(cpu_index: usize, exit_code: GuestVMExit) {
     let count = GUEST_EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if count <= 8 || count.is_power_of_two() {
-        log::info!(
-            "guest exit debug: count={} cpu={} exit_code={:?}",
-            count,
-            cpu_index,
-            exit_code
-        );
-    }
 
     let hz = tsc_hz();
     if hz == 0 {
+        if count <= 8 || count.is_power_of_two() {
+            log::info!(
+                "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
+                count,
+                cpu_index,
+                exit_code
+            );
+        }
         return;
     }
 
@@ -108,7 +127,7 @@ fn maybe_log_guest_exit(cpu_index: usize, exit_code: GuestVMExit) {
     let now = rdtsc();
     let last = GUEST_EXIT_LAST_LOG_TSC.load(Ordering::Relaxed);
 
-    if now.wrapping_sub(last) < interval {
+    if last != 0 && now.wrapping_sub(last) < interval {
         return;
     }
 
@@ -117,10 +136,12 @@ fn maybe_log_guest_exit(cpu_index: usize, exit_code: GuestVMExit) {
         .is_ok()
     {
         log::info!(
-            "guest exit periodic log: cpu={} exit_code={:?} tsc={:#x}",
+            "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
+            count,
             cpu_index,
             exit_code,
-            now
+            now,
+            hz
         );
     }
 }
