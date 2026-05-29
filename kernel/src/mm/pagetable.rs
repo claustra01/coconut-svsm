@@ -214,6 +214,11 @@ impl PagingMode {
 pub struct PTEntry(PhysAddr);
 
 impl PTEntry {
+    /// Creates a page table entry from raw PTE bits.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(PhysAddr::from(raw))
+    }
+
     /// Check if the page table entry is clear (null).
     pub fn is_clear(&self) -> bool {
         self.0.is_null()

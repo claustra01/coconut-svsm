@@ -16,6 +16,7 @@ use crate::requests::SvsmCaa;
 use crate::sev::ghcb::switch_to_vmpl;
 use crate::sev::vmsa::VMSAControl;
 use crate::types::GUEST_VMPL;
+use crate::vmm::guest_symbols::{GuestSymbolContext, maybe_resolve_linux_banner};
 
 use core::ops::DerefMut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -107,12 +108,17 @@ fn tsc_hz() -> u64 {
     hz
 }
 
-fn maybe_log_guest_exit(cpu_index: usize, exit_code: GuestVMExit) {
+fn maybe_log_guest_exit(
+    cpu_index: usize,
+    exit_code: GuestVMExit,
+    guest_symbol_ctx: GuestSymbolContext,
+) {
     let count = GUEST_EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
     let hz = tsc_hz();
     if hz == 0 {
         if count <= 8 || count.is_power_of_two() {
+            maybe_resolve_linux_banner(guest_symbol_ctx);
             log::info!(
                 "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
                 count,
@@ -135,6 +141,7 @@ fn maybe_log_guest_exit(cpu_index: usize, exit_code: GuestVMExit) {
         .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
+        maybe_resolve_linux_banner(guest_symbol_ctx);
         log::info!(
             "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
             count,
@@ -273,6 +280,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
             let mut vmsa_ref = cpu.guest_vmsa_ref();
             let vmsa = vmsa_ref.vmsa();
             let exit_code = vmsa.guest_exit_code;
+            let guest_symbol_ctx = GuestSymbolContext::from_vmsa(vmsa);
 
             if log_once_for_cpu(&GUEST_RETURN_LOGGED_CPUS, cpu_index) {
                 log::info!(
@@ -286,7 +294,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
             vmsa.disable();
 
             cpu.ai_handle_intercepts(vmsa);
-            maybe_log_guest_exit(cpu_index, exit_code);
+            maybe_log_guest_exit(cpu_index, exit_code, guest_symbol_ctx);
 
             if let Some(msg) = get_svsm_request_message(vmsa_ref.deref_mut()) {
                 return msg;

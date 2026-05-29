@@ -5,6 +5,7 @@
 // Author: Jon Lange (jlange@microsoft.com)
 
 pub mod execloop;
+pub mod guest_symbols;
 pub mod message;
 pub mod registers;
 
