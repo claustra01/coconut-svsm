@@ -191,6 +191,10 @@ fn read_guest_slice(ctx: GuestSymbolContext, gva: VirtAddr, buf: &mut [u8]) -> O
     Some(())
 }
 
+pub fn read_guest_virt_slice(ctx: GuestSymbolContext, gva: VirtAddr, buf: &mut [u8]) -> Option<()> {
+    read_guest_slice(ctx, gva, buf)
+}
+
 pub fn maybe_resolve_linux_banner(ctx: GuestSymbolContext) {
     if LINUX_BANNER_GVA.load(Ordering::Acquire) != 0 {
         return;

@@ -17,6 +17,7 @@ use crate::sev::ghcb::switch_to_vmpl;
 use crate::sev::vmsa::VMSAControl;
 use crate::types::GUEST_VMPL;
 use crate::vmm::guest_symbols::{GuestSymbolContext, maybe_resolve_linux_banner};
+use crate::vmm::tcp_log::maybe_log_tcp_connections;
 
 use core::ops::DerefMut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -119,6 +120,7 @@ fn maybe_log_guest_exit(
     if hz == 0 {
         if count <= 8 || count.is_power_of_two() {
             maybe_resolve_linux_banner(guest_symbol_ctx);
+            maybe_log_tcp_connections(guest_symbol_ctx);
             log::info!(
                 "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
                 count,
@@ -142,6 +144,7 @@ fn maybe_log_guest_exit(
         .is_ok()
     {
         maybe_resolve_linux_banner(guest_symbol_ctx);
+        maybe_log_tcp_connections(guest_symbol_ctx);
         log::info!(
             "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
             count,

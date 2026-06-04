@@ -8,6 +8,7 @@ pub mod execloop;
 pub mod guest_symbols;
 pub mod message;
 pub mod registers;
+pub mod tcp_log;
 
 pub use execloop::enter_guest;
 pub use message::*;
