@@ -28,6 +28,7 @@ const KVM_CPUID_SIGNATURE: u32 = 0x4000_0000;
 const KVM_CPUID_TSC_FREQUENCY: u32 = KVM_CPUID_SIGNATURE | 0x10;
 
 static GUEST_EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static GUEST_EXIT_LAST_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 static GUEST_EXIT_LAST_LOG_TSC: AtomicU64 = AtomicU64::new(0);
 static GUEST_ENTRY_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
 static GUEST_RETURN_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
@@ -96,7 +97,7 @@ fn tsc_hz() -> u64 {
 
     if !TSC_HZ_LOGGED.swap(true, Ordering::AcqRel) {
         log::info!(
-            "guest exit heartbeat: tsc_hz={} max_cpuid_leaf={:#x} max_hypervisor_leaf={:#x} cpuid_15={:?} cpuid_16={:?} cpuid_40000010={:?}",
+            "vmexit heartbeat config: tsc_hz={} max_cpuid_leaf={:#x} max_hypervisor_leaf={:#x} cpuid_15={:?} cpuid_16={:?} cpuid_40000010={:?}",
             hz,
             max_leaf,
             max_hypervisor_leaf,
@@ -109,23 +110,36 @@ fn tsc_hz() -> u64 {
     hz
 }
 
-fn maybe_log_guest_exit(
-    cpu_index: usize,
-    exit_code: GuestVMExit,
-    guest_symbol_ctx: GuestSymbolContext,
-) {
+fn guest_exit_elapsed_ms(elapsed_tsc: u64, hz: u64) -> Option<u64> {
+    if elapsed_tsc == 0 || hz == 0 {
+        return None;
+    }
+
+    let elapsed_ms = (elapsed_tsc as u128).saturating_mul(1_000) / (hz as u128);
+
+    Some(elapsed_ms.min(u64::MAX as u128) as u64)
+}
+
+fn maybe_log_guest_exit(guest_symbol_ctx: GuestSymbolContext) {
     let count = GUEST_EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
     let hz = tsc_hz();
     if hz == 0 {
         if count <= 8 || count.is_power_of_two() {
+            let last_count = GUEST_EXIT_LAST_LOG_COUNT.swap(count, Ordering::Relaxed);
+            let interval_count = count.saturating_sub(last_count);
+            let now = rdtsc();
+            let last = GUEST_EXIT_LAST_LOG_TSC.swap(now, Ordering::Relaxed);
+            let elapsed_tsc = if last == 0 { 0 } else { now.wrapping_sub(last) };
+
             maybe_resolve_linux_banner(guest_symbol_ctx);
             maybe_log_tcp_connections(guest_symbol_ctx);
             log::info!(
-                "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
+                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate={}/{}/tsc",
                 count,
-                cpu_index,
-                exit_code
+                interval_count,
+                interval_count,
+                elapsed_tsc
             );
         }
         return;
@@ -143,16 +157,31 @@ fn maybe_log_guest_exit(
         .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
+        let last_count = GUEST_EXIT_LAST_LOG_COUNT.swap(count, Ordering::Relaxed);
+        let interval_count = count.saturating_sub(last_count);
+        let elapsed_tsc = if last == 0 { 0 } else { now.wrapping_sub(last) };
+        let elapsed_ms = guest_exit_elapsed_ms(elapsed_tsc, hz);
+
         maybe_resolve_linux_banner(guest_symbol_ctx);
         maybe_log_tcp_connections(guest_symbol_ctx);
-        log::info!(
-            "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
-            count,
-            cpu_index,
-            exit_code,
-            now,
-            hz
-        );
+        if let Some(elapsed_ms) = elapsed_ms {
+            log::info!(
+                "vmexit heartbeat: total={} interval_count={} elapsed_ms={} rate={}/{}/tsc",
+                count,
+                interval_count,
+                elapsed_ms,
+                interval_count,
+                elapsed_tsc
+            );
+        } else {
+            log::info!(
+                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate={}/{}/tsc",
+                count,
+                interval_count,
+                interval_count,
+                elapsed_tsc
+            );
+        }
     }
 }
 
@@ -297,7 +326,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
             vmsa.disable();
 
             cpu.ai_handle_intercepts(vmsa);
-            maybe_log_guest_exit(cpu_index, exit_code, guest_symbol_ctx);
+            maybe_log_guest_exit(guest_symbol_ctx);
 
             if let Some(msg) = get_svsm_request_message(vmsa_ref.deref_mut()) {
                 return msg;
