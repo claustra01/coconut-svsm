@@ -128,18 +128,13 @@ fn maybe_log_guest_exit(guest_symbol_ctx: GuestSymbolContext) {
         if count <= 8 || count.is_power_of_two() {
             let last_count = GUEST_EXIT_LAST_LOG_COUNT.swap(count, Ordering::Relaxed);
             let interval_count = count.saturating_sub(last_count);
-            let now = rdtsc();
-            let last = GUEST_EXIT_LAST_LOG_TSC.swap(now, Ordering::Relaxed);
-            let elapsed_tsc = if last == 0 { 0 } else { now.wrapping_sub(last) };
 
             maybe_resolve_linux_banner(guest_symbol_ctx);
             maybe_log_tcp_connections(guest_symbol_ctx);
             log::info!(
-                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate={}/{}/tsc",
+                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate=unknown/ms",
                 count,
-                interval_count,
-                interval_count,
-                elapsed_tsc
+                interval_count
             );
         }
         return;
@@ -166,20 +161,18 @@ fn maybe_log_guest_exit(guest_symbol_ctx: GuestSymbolContext) {
         maybe_log_tcp_connections(guest_symbol_ctx);
         if let Some(elapsed_ms) = elapsed_ms {
             log::info!(
-                "vmexit heartbeat: total={} interval_count={} elapsed_ms={} rate={}/{}/tsc",
+                "vmexit heartbeat: total={} interval_count={} elapsed_ms={} rate={}/{}/ms",
                 count,
                 interval_count,
                 elapsed_ms,
                 interval_count,
-                elapsed_tsc
+                elapsed_ms
             );
         } else {
             log::info!(
-                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate={}/{}/tsc",
+                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate=unknown/ms",
                 count,
-                interval_count,
-                interval_count,
-                elapsed_tsc
+                interval_count
             );
         }
     }
