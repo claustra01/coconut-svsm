@@ -24,6 +24,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use cpuarch::vmsa::GuestVMExit;
 
 const GUEST_EXIT_LOG_INTERVAL_SECS: u64 = 30;
+const GUEST_EXIT_RATE_SCALE: u64 = 1_000;
 const KVM_CPUID_SIGNATURE: u32 = 0x4000_0000;
 const KVM_CPUID_TSC_FREQUENCY: u32 = KVM_CPUID_SIGNATURE | 0x10;
 
@@ -120,6 +121,17 @@ fn guest_exit_elapsed_ms(elapsed_tsc: u64, hz: u64) -> Option<u64> {
     Some(elapsed_ms.min(u64::MAX as u128) as u64)
 }
 
+fn guest_exit_rate_milli(exit_count: u64, elapsed_ms: u64) -> Option<u64> {
+    if elapsed_ms == 0 {
+        return None;
+    }
+
+    let rate =
+        (exit_count as u128).saturating_mul(GUEST_EXIT_RATE_SCALE as u128) / (elapsed_ms as u128);
+
+    Some(rate.min(u64::MAX as u128) as u64)
+}
+
 fn maybe_log_guest_exit(guest_symbol_ctx: GuestSymbolContext) {
     let count = GUEST_EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -128,13 +140,17 @@ fn maybe_log_guest_exit(guest_symbol_ctx: GuestSymbolContext) {
         if count <= 8 || count.is_power_of_two() {
             let last_count = GUEST_EXIT_LAST_LOG_COUNT.swap(count, Ordering::Relaxed);
             let interval_count = count.saturating_sub(last_count);
+            let now = rdtsc();
+            let last = GUEST_EXIT_LAST_LOG_TSC.swap(now, Ordering::Relaxed);
+            let elapsed_tsc = if last == 0 { 0 } else { now.wrapping_sub(last) };
 
             maybe_resolve_linux_banner(guest_symbol_ctx);
             maybe_log_tcp_connections(guest_symbol_ctx);
             log::info!(
-                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate=unknown/ms",
+                "vmexit heartbeat: total={} interval_count={} elapsed_tsc={} elapsed_ms=unknown rate=unknown/ms",
                 count,
-                interval_count
+                interval_count,
+                elapsed_tsc
             );
         }
         return;
@@ -159,20 +175,24 @@ fn maybe_log_guest_exit(guest_symbol_ctx: GuestSymbolContext) {
 
         maybe_resolve_linux_banner(guest_symbol_ctx);
         maybe_log_tcp_connections(guest_symbol_ctx);
-        if let Some(elapsed_ms) = elapsed_ms {
+        if let Some((elapsed_ms, rate_milli)) = elapsed_ms
+            .and_then(|ms| guest_exit_rate_milli(interval_count, ms).map(|rate| (ms, rate)))
+        {
             log::info!(
-                "vmexit heartbeat: total={} interval_count={} elapsed_ms={} rate={}/{}/ms",
+                "vmexit heartbeat: total={} interval_count={} elapsed_tsc={} elapsed_ms={} rate={}.{:03}/ms",
                 count,
                 interval_count,
+                elapsed_tsc,
                 elapsed_ms,
-                interval_count,
-                elapsed_ms
+                rate_milli / GUEST_EXIT_RATE_SCALE,
+                rate_milli % GUEST_EXIT_RATE_SCALE
             );
         } else {
             log::info!(
-                "vmexit heartbeat: total={} interval_count={} elapsed_ms=unknown rate=unknown/ms",
+                "vmexit heartbeat: total={} interval_count={} elapsed_tsc={} elapsed_ms=unknown rate=unknown/ms",
                 count,
-                interval_count
+                interval_count,
+                elapsed_tsc
             );
         }
     }
