@@ -95,15 +95,15 @@ fn tsc_hz() -> u64 {
     TSC_HZ_PROBED.store(true, Ordering::Release);
 
     if !TSC_HZ_LOGGED.swap(true, Ordering::AcqRel) {
-        log::info!(
-            "guest exit heartbeat: tsc_hz={} max_cpuid_leaf={:#x} max_hypervisor_leaf={:#x} cpuid_15={:?} cpuid_16={:?} cpuid_40000010={:?}",
-            hz,
-            max_leaf,
-            max_hypervisor_leaf,
-            leaf15_regs,
-            leaf16_regs,
-            leaf40000010_regs
-        );
+        // log::info!(
+        //     "guest exit heartbeat: tsc_hz={} max_cpuid_leaf={:#x} max_hypervisor_leaf={:#x} cpuid_15={:?} cpuid_16={:?} cpuid_40000010={:?}",
+        //     hz,
+        //     max_leaf,
+        //     max_hypervisor_leaf,
+        //     leaf15_regs,
+        //     leaf16_regs,
+        //     leaf40000010_regs
+        // );
     }
 
     hz
@@ -121,12 +121,12 @@ fn maybe_log_guest_exit(
         if count <= 8 || count.is_power_of_two() {
             maybe_resolve_linux_banner(guest_symbol_ctx);
             maybe_log_tcp_connections(guest_symbol_ctx);
-            log::info!(
-                "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
-                count,
-                cpu_index,
-                exit_code
-            );
+            // log::info!(
+            //     "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
+            //     count,
+            //     cpu_index,
+            //     exit_code
+            // );
         }
         return;
     }
@@ -145,14 +145,14 @@ fn maybe_log_guest_exit(
     {
         maybe_resolve_linux_banner(guest_symbol_ctx);
         maybe_log_tcp_connections(guest_symbol_ctx);
-        log::info!(
-            "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
-            count,
-            cpu_index,
-            exit_code,
-            now,
-            hz
-        );
+        // log::info!(
+        //     "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
+        //     count,
+        //     cpu_index,
+        //     exit_code,
+        //     now,
+        //     hz
+        // );
     }
 }
 

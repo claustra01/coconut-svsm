@@ -90,13 +90,13 @@ pub fn maybe_log_tcp_connections(ctx: GuestSymbolContext) {
     };
 
     if !TCP_HASHINFO_LOGGED.swap(true, Ordering::AcqRel) {
-        log::info!(
-            "guest tcp hashinfo: tcp_hashinfo_gva={:#x} ehash={:#x} ehash_mask={:#x} ehash_size={}",
-            tcp_hashinfo.bits(),
-            ehash_ptr,
-            ehash_mask,
-            ehash_size
-        );
+        // log::info!(
+        //     "guest tcp hashinfo: tcp_hashinfo_gva={:#x} ehash={:#x} ehash_mask={:#x} ehash_size={}",
+        //     tcp_hashinfo.bits(),
+        //     ehash_ptr,
+        //     ehash_mask,
+        //     ehash_size
+        // );
     }
 
     for bucket_index in 0..ehash_size {
@@ -183,22 +183,22 @@ fn try_log_sock(ctx: GuestSymbolContext, bucket_index: u32, sock_ptr: u64) {
 
     let src = saddr.to_be_bytes();
     let dst = daddr.to_be_bytes();
-    log::info!(
-        "guest tcp: bucket={} sock={:#x} state={} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",
-        bucket_index,
-        sock_ptr,
-        state,
-        src[0],
-        src[1],
-        src[2],
-        src[3],
-        sport,
-        dst[0],
-        dst[1],
-        dst[2],
-        dst[3],
-        dport
-    );
+    // log::info!(
+    //     "guest tcp: bucket={} sock={:#x} state={} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",
+    //     bucket_index,
+    //     sock_ptr,
+    //     state,
+    //     src[0],
+    //     src[1],
+    //     src[2],
+    //     src[3],
+    //     sport,
+    //     dst[0],
+    //     dst[1],
+    //     dst[2],
+    //     dst[3],
+    //     dport
+    // );
 }
 
 fn remember_sock(sock_ptr: u64) -> bool {
