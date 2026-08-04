@@ -1,7 +1,31 @@
 FEATURES ?= vtpm
-ifneq ($(FEATURES),)
-SVSM_ARGS += --features ${FEATURES}
-XBUILD_ARGS += -f ${FEATURES}
+TCP_LOG_MODE ?= enabled
+
+# disabled: keep the current no-log path.
+# logging-disabled: enable tcp_log scanning, but not its log output.
+# enabled: enable the configurable logging (the default).
+ifeq ($(TCP_LOG_MODE),disabled)
+TCP_LOG_FEATURES =
+else ifeq ($(TCP_LOG_MODE),logging-disabled)
+TCP_LOG_FEATURES = tcp-log
+else ifeq ($(TCP_LOG_MODE),enabled)
+TCP_LOG_FEATURES = tcp-log-output
+else
+$(error TCP_LOG_MODE must be one of: disabled, logging-disabled, enabled)
+endif
+
+BUILD_FEATURES := $(FEATURES)
+ifneq ($(TCP_LOG_FEATURES),)
+ifneq ($(BUILD_FEATURES),)
+BUILD_FEATURES := $(BUILD_FEATURES),$(TCP_LOG_FEATURES)
+else
+BUILD_FEATURES := $(TCP_LOG_FEATURES)
+endif
+endif
+
+ifneq ($(BUILD_FEATURES),)
+SVSM_ARGS += --features ${BUILD_FEATURES}
+XBUILD_ARGS += -f ${BUILD_FEATURES}
 endif
 
 FEATURES_TEST ?= vtpm,virtio-drivers,block,vsock
@@ -71,6 +95,12 @@ RUSTDOC_OUTPUT = target/x86_64-unknown-none/doc
 DOC_SITE = target/x86_64-unknown-none/site
 
 all: igvm
+
+tsc-only:
+	$(MAKE) TCP_LOG_MODE=logging-disabled all
+
+no-log:
+	$(MAKE) TCP_LOG_MODE=disabled all
 
 aproxy: $(APROXY) $(APROXYBIN)
 
@@ -189,4 +219,4 @@ clean:
 
 distclean: clean
 
-.PHONY: test miri clean clippy bin/stage2.bin bin/svsm-kernel.elf bin/test-kernel.elf stage1_elf_trampoline distclean $(APROXYBIN) $(IGVM_FILES) $(IGVM_TEST_FILES)
+.PHONY: test miri clean clippy tsc-only no-log bin/stage2.bin bin/svsm-kernel.elf bin/test-kernel.elf stage1_elf_trampoline distclean $(APROXYBIN) $(IGVM_FILES) $(IGVM_TEST_FILES)

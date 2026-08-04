@@ -76,6 +76,8 @@ attest = ["dep:aes-kw", "dep:cocoon-tpm-crypto", "dep:cocoon-tpm-tpm2-interface"
 
 default = []
 enable-gdb = ["dep:gdbstub", "dep:gdbstub_arch"]
+tcp-log = []
+tcp-log-output = ["tcp-log"]
 vtpm = ["dep:libtcgtpm"]
 nosmep = []
 nosmap = []

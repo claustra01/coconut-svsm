@@ -183,22 +183,25 @@ fn try_log_sock(ctx: GuestSymbolContext, bucket_index: u32, sock_ptr: u64) {
 
     let src = saddr.to_be_bytes();
     let dst = daddr.to_be_bytes();
-    // log::info!(
-    //     "guest tcp: bucket={} sock={:#x} state={} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",
-    //     bucket_index,
-    //     sock_ptr,
-    //     state,
-    //     src[0],
-    //     src[1],
-    //     src[2],
-    //     src[3],
-    //     sport,
-    //     dst[0],
-    //     dst[1],
-    //     dst[2],
-    //     dst[3],
-    //     dport
-    // );
+    #[cfg(feature = "tcp-log-output")]
+    {
+        log::info!(
+            "guest tcp: bucket={} sock={:#x} state={} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",
+            bucket_index,
+            sock_ptr,
+            state,
+            src[0],
+            src[1],
+            src[2],
+            src[3],
+            sport,
+            dst[0],
+            dst[1],
+            dst[2],
+            dst[3],
+            dport
+        );
+    }
 }
 
 fn remember_sock(sock_ptr: u64) -> bool {
