@@ -589,6 +589,13 @@ fn svsm_init(launch_info: &KernelLaunchInfo) {
             Err(e) => log::info!("Failed to launch /init: {e:?}"),
         }
 
+        #[cfg(feature = "tcp-log-vsock")]
+        start_kernel_task(
+            KernelThreadStartInfo::new(svsm::vmm::tcp_telemetry::tcp_telemetry_task, 0),
+            String::from("TCP telemetry sender"),
+        )
+        .expect("Failed to launch TCP telemetry sender task");
+
         // Start request processing on this CPU if required.
         if SVSM_PLATFORM.start_svsm_request_loop() {
             start_kernel_task(

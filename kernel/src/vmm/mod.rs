@@ -9,6 +9,8 @@ pub mod guest_symbols;
 pub mod message;
 pub mod registers;
 pub mod tcp_log;
+#[cfg(feature = "tcp-log-vsock")]
+pub mod tcp_telemetry;
 
 pub use execloop::enter_guest;
 pub use message::*;

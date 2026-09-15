@@ -4,14 +4,17 @@ TCP_LOG_MODE ?= enabled
 # disabled: keep the current no-log path.
 # logging-disabled: enable tcp_log scanning, but not its log output.
 # enabled: enable the configurable logging (the default).
+# vsock: send observed TCP connection events to a host relay over virtio-vsock.
 ifeq ($(TCP_LOG_MODE),disabled)
 TCP_LOG_FEATURES =
 else ifeq ($(TCP_LOG_MODE),logging-disabled)
 TCP_LOG_FEATURES = tcp-log
 else ifeq ($(TCP_LOG_MODE),enabled)
 TCP_LOG_FEATURES = tcp-log-output
+else ifeq ($(TCP_LOG_MODE),vsock)
+TCP_LOG_FEATURES = tcp-log-vsock
 else
-$(error TCP_LOG_MODE must be one of: disabled, logging-disabled, enabled)
+$(error TCP_LOG_MODE must be one of: disabled, logging-disabled, enabled, vsock)
 endif
 
 BUILD_FEATURES := $(FEATURES)

@@ -4,9 +4,11 @@
 //
 // Author: Shinya Murakami <sny430@gmail.com>
 
-use crate::address::{Address, VirtAddr};
+use crate::address::VirtAddr;
 use crate::locking::SpinLock;
 use crate::vmm::guest_symbols::{GuestSymbolContext, read_guest_virt_slice, tcp_hashinfo_gva};
+#[cfg(feature = "tcp-log-vsock")]
+use crate::vmm::tcp_telemetry::{enqueue_tcp_event, telemetry_pending};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 // Offsets from pahole.memo for the current Ubuntu guest kernel.
@@ -70,23 +72,26 @@ impl LoggedSockCache {
     }
 }
 
-pub fn maybe_log_tcp_connections(ctx: GuestSymbolContext) {
+pub fn maybe_log_tcp_connections(ctx: GuestSymbolContext) -> bool {
+    #[cfg(feature = "tcp-log-vsock")]
+    let mut wake_sender = telemetry_pending();
+
     let tcp_hashinfo = match tcp_hashinfo_gva() {
         Some(gva) => gva,
-        None => return,
+        None => return wake_sender_if_enabled(),
     };
 
     let ehash_ptr = match read_guest_u64(ctx, tcp_hashinfo + INET_HASHINFO_EHASH_OFFSET) {
         Some(ptr) if ptr != 0 => ptr,
-        _ => return,
+        _ => return wake_sender_if_enabled(),
     };
     let ehash_mask = match read_guest_u32(ctx, tcp_hashinfo + INET_HASHINFO_EHASH_MASK_OFFSET) {
         Some(mask) => mask,
-        None => return,
+        None => return wake_sender_if_enabled(),
     };
     let ehash_size = match ehash_mask.checked_add(1) {
         Some(size) if size != 0 => size,
-        _ => return,
+        _ => return wake_sender_if_enabled(),
     };
 
     if !TCP_HASHINFO_LOGGED.swap(true, Ordering::AcqRel) {
@@ -100,25 +105,46 @@ pub fn maybe_log_tcp_connections(ctx: GuestSymbolContext) {
     }
 
     for bucket_index in 0..ehash_size {
+        #[cfg(feature = "tcp-log-vsock")]
+        {
+            wake_sender |= scan_bucket(ctx, ehash_ptr, bucket_index);
+        }
+        #[cfg(not(feature = "tcp-log-vsock"))]
         scan_bucket(ctx, ehash_ptr, bucket_index);
     }
+
+    #[cfg(feature = "tcp-log-vsock")]
+    return wake_sender;
+    #[cfg(not(feature = "tcp-log-vsock"))]
+    false
 }
 
-fn scan_bucket(ctx: GuestSymbolContext, ehash_ptr: u64, bucket_index: u32) {
+#[cfg(feature = "tcp-log-vsock")]
+fn wake_sender_if_enabled() -> bool {
+    telemetry_pending()
+}
+
+#[cfg(not(feature = "tcp-log-vsock"))]
+fn wake_sender_if_enabled() -> bool {
+    false
+}
+
+fn scan_bucket(ctx: GuestSymbolContext, ehash_ptr: u64, bucket_index: u32) -> bool {
+    let mut wake_sender = false;
     let bucket_offset = match (bucket_index as u64).checked_mul(INET_EHASH_BUCKET_SIZE as u64) {
         Some(offset) => offset,
-        None => return,
+        None => return false,
     };
     let bucket_gva = match ehash_ptr
         .checked_add(bucket_offset)
         .and_then(|addr| addr.checked_add(INET_EHASH_BUCKET_CHAIN_OFFSET as u64))
     {
         Some(addr) => VirtAddr::from(addr as usize),
-        None => return,
+        None => return false,
     };
     let mut node_ptr = match read_guest_u64(ctx, bucket_gva) {
         Some(ptr) => ptr,
-        None => return,
+        None => return false,
     };
 
     let mut scanned = 0;
@@ -128,7 +154,7 @@ fn scan_bucket(ctx: GuestSymbolContext, ehash_ptr: u64, bucket_index: u32) {
             None => break,
         };
 
-        try_log_sock(ctx, bucket_index, sock_ptr);
+        wake_sender |= try_log_sock(ctx, bucket_index, sock_ptr);
 
         node_ptr = match read_guest_u64(
             ctx,
@@ -139,52 +165,54 @@ fn scan_bucket(ctx: GuestSymbolContext, ehash_ptr: u64, bucket_index: u32) {
         };
         scanned += 1;
     }
+
+    wake_sender
 }
 
-fn try_log_sock(ctx: GuestSymbolContext, bucket_index: u32, sock_ptr: u64) {
+fn try_log_sock(ctx: GuestSymbolContext, bucket_index: u32, sock_ptr: u64) -> bool {
     let sock_gva = VirtAddr::from(sock_ptr as usize);
 
     let family = match read_guest_u16(ctx, sock_gva + SOCK_COMMON_FAMILY_OFFSET) {
         Some(val) => val,
-        None => return,
+        None => return false,
     };
     if family != AF_INET {
-        return;
+        return false;
     }
 
     let state = match read_guest_u8(ctx, sock_gva + SOCK_COMMON_STATE_OFFSET) {
         Some(val) => val,
-        None => return,
+        None => return false,
     };
     if state != TCP_ESTABLISHED && state != TCP_TIME_WAIT {
-        return;
+        return false;
     }
 
     let daddr = match read_guest_be32(ctx, sock_gva + SOCK_COMMON_DADDR_OFFSET) {
         Some(val) => val,
-        None => return,
+        None => return false,
     };
     let saddr = match read_guest_be32(ctx, sock_gva + SOCK_COMMON_RCV_SADDR_OFFSET) {
         Some(val) => val,
-        None => return,
+        None => return false,
     };
     let dport = match read_guest_be16(ctx, sock_gva + SOCK_COMMON_DPORT_OFFSET) {
         Some(val) => val,
-        None => return,
+        None => return false,
     };
     let sport = match read_guest_u16(ctx, sock_gva + SOCK_COMMON_NUM_OFFSET) {
         Some(val) => val,
-        None => return,
+        None => return false,
     };
 
     if !remember_sock(sock_ptr) {
-        return;
+        return false;
     }
 
-    let src = saddr.to_be_bytes();
-    let dst = daddr.to_be_bytes();
     #[cfg(feature = "tcp-log-output")]
     {
+        let src = saddr.to_be_bytes();
+        let dst = daddr.to_be_bytes();
         log::info!(
             "guest tcp: bucket={} sock={:#x} state={} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{}",
             bucket_index,
@@ -202,6 +230,25 @@ fn try_log_sock(ctx: GuestSymbolContext, bucket_index: u32, sock_ptr: u64) {
             dport
         );
     }
+
+    #[cfg(feature = "tcp-log-vsock")]
+    let queued = enqueue_tcp_event(
+        sock_ptr,
+        state,
+        saddr.to_be_bytes(),
+        sport,
+        daddr.to_be_bytes(),
+        dport,
+    );
+    #[cfg(not(feature = "tcp-log-vsock"))]
+    let queued = false;
+
+    #[cfg(not(any(feature = "tcp-log-output", feature = "tcp-log-vsock")))]
+    let _ = (daddr, saddr, dport, sport);
+    #[cfg(not(feature = "tcp-log-output"))]
+    let _ = bucket_index;
+
+    queued
 }
 
 fn remember_sock(sock_ptr: u64) -> bool {

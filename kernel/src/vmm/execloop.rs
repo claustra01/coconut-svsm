@@ -31,7 +31,6 @@ static GUEST_EXIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static GUEST_EXIT_LAST_LOG_TSC: AtomicU64 = AtomicU64::new(0);
 static GUEST_ENTRY_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
 static GUEST_RETURN_LOGGED_CPUS: AtomicU64 = AtomicU64::new(0);
-static TSC_HZ_LOGGED: AtomicBool = AtomicBool::new(false);
 static TSC_HZ_PROBED: AtomicBool = AtomicBool::new(false);
 static TSC_HZ_CACHE: AtomicU64 = AtomicU64::new(0);
 
@@ -55,13 +54,8 @@ fn tsc_hz() -> u64 {
         .map(|r| r.eax)
         .unwrap_or(0);
     let mut hz = 0;
-    let mut leaf15_regs = None;
-    let mut leaf16_regs = None;
-    let mut leaf40000010_regs = None;
-
     if max_leaf >= 0x15 {
         if let Some(leaf) = SVSM_PLATFORM.cpuid(0x15, 0) {
-            leaf15_regs = Some((leaf.eax, leaf.ebx, leaf.ecx, leaf.edx));
             let denom = leaf.eax as u64;
             let numer = leaf.ebx as u64;
             let crystal = leaf.ecx as u64;
@@ -73,7 +67,6 @@ fn tsc_hz() -> u64 {
 
     if hz == 0 && max_leaf >= 0x16 {
         if let Some(leaf) = SVSM_PLATFORM.cpuid(0x16, 0) {
-            leaf16_regs = Some((leaf.eax, leaf.ebx, leaf.ecx, leaf.edx));
             let mhz = (leaf.eax & 0xffff) as u64;
             if mhz != 0 {
                 hz = mhz.saturating_mul(1_000_000);
@@ -83,7 +76,6 @@ fn tsc_hz() -> u64 {
 
     if hz == 0 && max_hypervisor_leaf >= KVM_CPUID_TSC_FREQUENCY {
         if let Some(leaf) = SVSM_PLATFORM.cpuid(KVM_CPUID_TSC_FREQUENCY, 0) {
-            leaf40000010_regs = Some((leaf.eax, leaf.ebx, leaf.ecx, leaf.edx));
             let khz = leaf.eax as u64;
             if khz != 0 {
                 hz = khz.saturating_mul(1_000);
@@ -94,41 +86,30 @@ fn tsc_hz() -> u64 {
     TSC_HZ_CACHE.store(hz, Ordering::Relaxed);
     TSC_HZ_PROBED.store(true, Ordering::Release);
 
-    if !TSC_HZ_LOGGED.swap(true, Ordering::AcqRel) {
-        // log::info!(
-        //     "guest exit heartbeat: tsc_hz={} max_cpuid_leaf={:#x} max_hypervisor_leaf={:#x} cpuid_15={:?} cpuid_16={:?} cpuid_40000010={:?}",
-        //     hz,
-        //     max_leaf,
-        //     max_hypervisor_leaf,
-        //     leaf15_regs,
-        //     leaf16_regs,
-        //     leaf40000010_regs
-        // );
-    }
-
     hz
 }
 
 fn maybe_log_guest_exit(
-    cpu_index: usize,
-    exit_code: GuestVMExit,
+    _cpu_index: usize,
+    _exit_code: GuestVMExit,
     guest_symbol_ctx: GuestSymbolContext,
-) {
+) -> bool {
     let count = GUEST_EXIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
 
     let hz = tsc_hz();
     if hz == 0 {
         if count <= 8 || count.is_power_of_two() {
             maybe_resolve_linux_banner(guest_symbol_ctx);
-            maybe_log_tcp_connections(guest_symbol_ctx);
+            let wake_sender = maybe_log_tcp_connections(guest_symbol_ctx);
             // log::info!(
             //     "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc_hz=unknown",
             //     count,
             //     cpu_index,
             //     exit_code
             // );
+            return wake_sender;
         }
-        return;
+        return false;
     }
 
     let interval = hz.saturating_mul(GUEST_EXIT_LOG_INTERVAL_SECS);
@@ -136,7 +117,7 @@ fn maybe_log_guest_exit(
     let last = GUEST_EXIT_LAST_LOG_TSC.load(Ordering::Relaxed);
 
     if last != 0 && now.wrapping_sub(last) < interval {
-        return;
+        return false;
     }
 
     if GUEST_EXIT_LAST_LOG_TSC
@@ -145,7 +126,7 @@ fn maybe_log_guest_exit(
     {
         maybe_resolve_linux_banner(guest_symbol_ctx);
         #[cfg(feature = "tcp-log")]
-        maybe_log_tcp_connections(guest_symbol_ctx);
+        return maybe_log_tcp_connections(guest_symbol_ctx);
         // log::info!(
         //     "guest exit heartbeat: count={} cpu={} exit_code={:?} tsc={:#x} tsc_hz={}",
         //     count,
@@ -155,6 +136,8 @@ fn maybe_log_guest_exit(
         //     hz
         // );
     }
+
+    false
 }
 
 fn get_and_clear_caa_request_flag(vmsa_ref: &GuestVmsaRef) -> Result<bool, SvsmReqError> {
@@ -217,7 +200,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
 
     // If no VMSA or CAA are configured, then the guest cannot be entered.
     if cpu.update_guest_mappings().is_err() {
-        log::info!("enter_guest debug: cpu={} has no guest mappings", cpu_index);
+        log::info!("enter_guest debug: cpu={cpu_index} has no guest mappings");
         return GuestExitMessage::NoMappings;
     }
 
@@ -255,11 +238,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
         flush_tlb_global_sync();
 
         if log_once_for_cpu(&GUEST_ENTRY_LOGGED_CPUS, cpu_index) {
-            log::info!(
-                "enter_guest debug: cpu={} switching to guest vmpl={}",
-                cpu_index,
-                GUEST_VMPL
-            );
+            log::info!("enter_guest debug: cpu={cpu_index} switching to guest vmpl={GUEST_VMPL}");
         }
 
         switch_to_vmpl(GUEST_VMPL as u32);
@@ -271,16 +250,13 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
         // If no mapping exists, then indicate to the caller that the guest
         // exited with no valid mappings.
         if cpu.update_guest_mappings().is_err() {
-            log::info!(
-                "enter_guest debug: cpu={} returned without guest mappings",
-                cpu_index
-            );
+            log::info!("enter_guest debug: cpu={cpu_index} returned without guest mappings");
             return GuestExitMessage::NoMappings;
         }
 
         // Obtain a reference to the VMSA just long enough to extract the
         // request parameters.
-        {
+        let (message, wake_telemetry_sender) = {
             let mut vmsa_ref = cpu.guest_vmsa_ref();
             let vmsa = vmsa_ref.vmsa();
             let exit_code = vmsa.guest_exit_code;
@@ -288,9 +264,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
 
             if log_once_for_cpu(&GUEST_RETURN_LOGGED_CPUS, cpu_index) {
                 log::info!(
-                    "enter_guest debug: cpu={} returned from guest exit_code={:?}",
-                    cpu_index,
-                    exit_code
+                    "enter_guest debug: cpu={cpu_index} returned from guest exit_code={exit_code:?}"
                 );
             }
 
@@ -298,11 +272,20 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
             vmsa.disable();
 
             cpu.ai_handle_intercepts(vmsa);
-            maybe_log_guest_exit(cpu_index, exit_code, guest_symbol_ctx);
+            let wake_sender = maybe_log_guest_exit(cpu_index, exit_code, guest_symbol_ctx);
+            let message = get_svsm_request_message(vmsa_ref.deref_mut());
+            (message, wake_sender)
+        };
 
-            if let Some(msg) = get_svsm_request_message(vmsa_ref.deref_mut()) {
-                return msg;
-            }
+        #[cfg(feature = "tcp-log-vsock")]
+        if wake_telemetry_sender {
+            crate::task::schedule();
+        }
+        #[cfg(not(feature = "tcp-log-vsock"))]
+        let _ = wake_telemetry_sender;
+
+        if let Some(message) = message {
+            return message;
         }
     }
 }
