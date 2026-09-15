@@ -6,12 +6,15 @@
 
 //! Delivery of observed guest TCP connection metadata over virtio-vsock.
 
+extern crate alloc;
+
 use crate::cpu::msr::rdtsc;
 use crate::io::Write;
 use crate::locking::SpinLock;
-use crate::task::schedule;
+use crate::task::{KernelThreadStartInfo, schedule, start_kernel_task};
 use crate::vsock::{VMADDR_CID_HOST, stream::VsockStream};
-use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::string::String;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const TELEMETRY_PORT: u32 = 4050;
 const QUEUE_CAPACITY: usize = 128;
@@ -23,6 +26,7 @@ const SEND_BATCH_SIZE: usize = 32;
 
 static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
+static SENDER_STARTED: AtomicBool = AtomicBool::new(false);
 static EVENT_QUEUE: SpinLock<EventQueue> = SpinLock::new(EventQueue::new());
 
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +144,25 @@ pub fn telemetry_pending() -> bool {
     !EVENT_QUEUE.lock().is_empty()
 }
 
+/// Starts the sender lazily on the first event, then yields to it on later
+/// batches. This keeps the normal SVSM boot scheduling path unchanged.
+pub fn wake_tcp_telemetry_sender() {
+    if SENDER_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        if let Err(error) = start_kernel_task(
+            KernelThreadStartInfo::new(tcp_telemetry_task, 0),
+            String::from("TCP telemetry sender"),
+        ) {
+            SENDER_STARTED.store(false, Ordering::Release);
+            log::warn!("Failed to launch TCP telemetry sender task: {error:?}");
+        }
+    } else {
+        schedule();
+    }
+}
+
 fn send_frame(stream: &mut VsockStream, frame: &[u8]) -> bool {
     let mut sent = 0;
     while sent < frame.len() {
@@ -158,6 +181,8 @@ fn send_frame(stream: &mut VsockStream, frame: &[u8]) -> bool {
 pub fn tcp_telemetry_task(_: usize) {
     let mut stream = None;
     let mut batch_count = 0;
+
+    log::info!("TCP telemetry sender started; host port={TELEMETRY_PORT}");
 
     loop {
         let Some(event) = EVENT_QUEUE.lock().front() else {

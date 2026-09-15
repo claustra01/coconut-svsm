@@ -279,7 +279,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
 
         #[cfg(feature = "tcp-log-vsock")]
         if wake_telemetry_sender {
-            crate::task::schedule();
+            crate::vmm::tcp_telemetry::wake_tcp_telemetry_sender();
         }
         #[cfg(not(feature = "tcp-log-vsock"))]
         let _ = wake_telemetry_sender;
