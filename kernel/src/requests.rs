@@ -79,6 +79,10 @@ fn request_loop_once(
     request: u32,
 ) -> Result<(), SvsmReqError> {
     match protocol {
+        #[cfg(feature = "tcp-log-guest")]
+        crate::protocols::tcp_telemetry::TCP_TELEMETRY_PROTOCOL => {
+            crate::protocols::tcp_telemetry::request(request, params)
+        }
         SVSM_CORE_PROTOCOL => core_protocol_request(request, params),
         SVSM_ATTEST_PROTOCOL => attest_protocol_request(request, params),
         #[cfg(all(feature = "vtpm", not(test)))]

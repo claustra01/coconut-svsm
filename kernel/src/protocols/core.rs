@@ -226,6 +226,10 @@ fn core_query_protocol(params: &mut RequestParams) -> Result<(), SvsmReqError> {
     let version: u32 = (rcx & 0xffff_ffffu64).try_into().unwrap();
 
     let ret_val = match protocol {
+        #[cfg(feature = "tcp-log-guest")]
+        crate::protocols::tcp_telemetry::TCP_TELEMETRY_PROTOCOL => {
+            protocol_supported(version, 1, 1)
+        }
         SVSM_CORE_PROTOCOL => protocol_supported(
             version,
             CORE_PROTOCOL_VERSION_MIN,

@@ -8,6 +8,8 @@ pub mod apic;
 pub mod attest;
 pub mod core;
 pub mod errors;
+#[cfg(feature = "tcp-log-guest")]
+pub mod tcp_telemetry;
 #[cfg(all(feature = "vtpm", not(test)))]
 pub mod vtpm;
 

@@ -1,0 +1,46 @@
+--- a/arch/x86/coco/sev/core.c
++++ b/arch/x86/coco/sev/core.c
+@@ -2441,6 +2441,33 @@
+ }
+ EXPORT_SYMBOL_GPL(snp_issue_svsm_attest_req);
+ 
++/* Experimental local SVSM protocol: drain TCP observations into one page. */
++int snp_socktrawl_read(u8 *buffer, size_t capacity)
++{
++	struct svsm_call call = {};
++	unsigned long flags;
++	int ret;
++
++	if (!snp_vmpl)
++		return -ENODEV;
++	if (!capacity || capacity > PAGE_SIZE || !IS_ALIGNED((unsigned long)buffer, PAGE_SIZE))
++		return -EINVAL;
++
++	local_irq_save(flags);
++	call.caa = svsm_get_caa();
++	call.rax = 0x80000054ULL << 32;
++	call.rcx = __pa(buffer);
++	call.rdx = capacity;
++	ret = svsm_perform_call_protocol(&call);
++	local_irq_restore(flags);
++	if (ret)
++		return ret;
++	if (call.rcx_out > capacity || call.rcx_out % 56)
++		return -EIO;
++	return call.rcx_out;
++}
++EXPORT_SYMBOL_GPL(snp_socktrawl_read);
++
+ int snp_issue_guest_request(u64 exit_code, struct snp_req_data *input, struct snp_guest_request_ioctl *rio)
+ {
+ 	struct ghcb_state state;
+--- a/arch/x86/include/asm/sev.h
++++ b/arch/x86/include/asm/sev.h
+@@ -399,6 +399,7 @@
+ u64 sev_get_status(void);
+ void sev_show_status(void);
+ void snp_update_svsm_ca(void);
++int snp_socktrawl_read(u8 *buffer, size_t capacity);
+ 
+ #else	/* !CONFIG_AMD_MEM_ENCRYPT */
+ 

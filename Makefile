@@ -4,14 +4,17 @@ TCP_LOG_MODE ?= enabled
 # disabled: keep the current no-log path.
 # logging-disabled: enable tcp_log scanning, but not its log output.
 # enabled: enable the configurable logging (the default).
+# guest: queue TCP records for the guest Linux relay.
 ifeq ($(TCP_LOG_MODE),disabled)
 TCP_LOG_FEATURES =
 else ifeq ($(TCP_LOG_MODE),logging-disabled)
 TCP_LOG_FEATURES = tcp-log
 else ifeq ($(TCP_LOG_MODE),enabled)
 TCP_LOG_FEATURES = tcp-log-output
+else ifeq ($(TCP_LOG_MODE),guest)
+TCP_LOG_FEATURES = tcp-log-guest
 else
-$(error TCP_LOG_MODE must be one of: disabled, logging-disabled, enabled)
+$(error TCP_LOG_MODE must be one of: disabled, logging-disabled, enabled, guest)
 endif
 
 BUILD_FEATURES := $(FEATURES)
