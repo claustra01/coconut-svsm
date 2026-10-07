@@ -32,6 +32,7 @@ SNAPSHOT="on"
 
 STATE_DEVICE=""
 VSOCK_DEVICE=""
+TCP_NET_DEVICE=""
 VIRTIO=0
 
 while [[ $# -gt 0 ]]; do
@@ -85,6 +86,11 @@ while [[ $# -gt 0 ]]; do
     --snapshot)
       SNAPSHOT=$2
       shift
+      shift
+      ;;
+    --tcp-net)
+      VIRTIO=1
+      TCP_NET_DEVICE="-netdev user,id=svsm_tcp -device virtio-net-device,netdev=svsm_tcp,mac=52:54:00:12:34:57 "
       shift
       ;;
     --vsock)
@@ -203,4 +209,5 @@ $SUDO_CMD \
     $VIRTIO_CONFIG \
     $STATE_DEVICE \
     $VSOCK_DEVICE \
+    $TCP_NET_DEVICE \
     "$@"

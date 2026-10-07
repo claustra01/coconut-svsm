@@ -11,8 +11,12 @@ pub mod registers;
 #[cfg(feature = "tcp-telemetry")]
 pub mod tcp_event;
 pub mod tcp_log;
+#[cfg(feature = "tcp-log-net")]
+pub mod tcp_net;
 #[cfg(feature = "tcp-telemetry")]
 pub mod tcp_telemetry;
+#[cfg(feature = "tcp-log-net")]
+pub mod tcp_udp;
 
 pub use execloop::enter_guest;
 pub use message::*;

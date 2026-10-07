@@ -70,7 +70,10 @@ use svsm::types::PAGE_SIZE;
 use svsm::utils::MemoryRegion;
 use svsm::utils::ScopedMut;
 use svsm::utils::round_to_pages;
-#[cfg(all(feature = "virtio-drivers", any(feature = "block", feature = "vsock")))]
+#[cfg(all(
+    feature = "virtio-drivers",
+    any(feature = "block", feature = "vsock", feature = "tcp-log-net")
+))]
 use svsm::virtio::probe_mmio_slots;
 #[cfg(all(feature = "vtpm", not(test)))]
 use svsm::vtpm::vtpm_init;
@@ -269,7 +272,7 @@ fn boot_stack_info() {
 /// Returns an error when a virtio device is found but its driver initialization fails.
 #[cfg(feature = "virtio-drivers")]
 fn initialize_virtio_mmio(_boot_params: &BootParams<'_>) -> Result<(), SvsmError> {
-    #[cfg(any(feature = "block", feature = "vsock"))]
+    #[cfg(any(feature = "block", feature = "vsock", feature = "tcp-log-net"))]
     let mut slots = probe_mmio_slots(_boot_params);
 
     #[cfg(feature = "block")]
@@ -283,6 +286,9 @@ fn initialize_virtio_mmio(_boot_params: &BootParams<'_>) -> Result<(), SvsmError
         use svsm::vsock::virtio_vsock::initialize_vsock;
         initialize_vsock(&mut slots)?;
     }
+
+    #[cfg(feature = "tcp-log-net")]
+    svsm::vmm::tcp_net::initialize(&mut slots)?;
 
     Ok(())
 }

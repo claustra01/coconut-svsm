@@ -280,7 +280,7 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
 
         // Obtain a reference to the VMSA just long enough to extract the
         // request parameters.
-        {
+        let message = {
             let mut vmsa_ref = cpu.guest_vmsa_ref();
             let vmsa = vmsa_ref.vmsa();
             let exit_code = vmsa.guest_exit_code;
@@ -300,9 +300,14 @@ pub fn enter_guest(mut regs: &[GuestRegister]) -> GuestExitMessage {
             cpu.ai_handle_intercepts(vmsa);
             maybe_log_guest_exit(cpu_index, exit_code, guest_symbol_ctx);
 
-            if let Some(msg) = get_svsm_request_message(vmsa_ref.deref_mut()) {
-                return msg;
-            }
+            get_svsm_request_message(vmsa_ref.deref_mut())
+        };
+
+        #[cfg(feature = "tcp-log-net")]
+        crate::vmm::tcp_net::flush();
+
+        if let Some(msg) = message {
+            return msg;
         }
     }
 }
