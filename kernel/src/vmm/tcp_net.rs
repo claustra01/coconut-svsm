@@ -17,6 +17,8 @@ struct Device {
     tx: VirtIONetTx<SvsmHal, MmioTransport<SvsmHal>>,
     _mmio: GlobalRangeGuard,
     failed: bool,
+    first_submitted: bool,
+    first_completed: bool,
 }
 
 static DEVICE: SpinLock<Option<Device>> = SpinLock::new(None);
@@ -26,13 +28,19 @@ pub fn initialize(slots: &mut MmioSlots) -> Result<(), SvsmError> {
         log::warn!("TCP UDP: no dedicated virtio-net MMIO device found");
         return Ok(());
     };
-    let tx = VirtIONetTx::new(slot.transport).map_err(|_| VirtioError::InvalidDevice)?;
+    let tx = VirtIONetTx::new(slot.transport).map_err(|error| {
+        log::error!("TCP UDP: device initialization failed: {error:?}");
+        VirtioError::InvalidDevice
+    })?;
     *DEVICE.lock() = Some(Device {
         tx,
         _mmio: slot.mmio_range,
         failed: false,
+        first_submitted: false,
+        first_completed: false,
     });
     log::info!("TCP UDP: 10.0.2.15:4050 -> 10.0.2.2:4050");
+    log::info!("TCP UDP: device initialized; waiting for TCP observations");
     Ok(())
 }
 
@@ -50,10 +58,19 @@ pub fn flush() {
             if !ready {
                 return Ok(false);
             }
+            if device.first_submitted && !device.first_completed {
+                device.first_completed = true;
+                log::info!("TCP UDP: first transmit completed by device");
+            }
             let Some(frame) = tcp_telemetry::pop_frame() else {
                 return Ok(false);
             };
             device.tx.send(&tcp_udp::encode(&frame))?;
+            if !device.first_submitted {
+                device.first_submitted = true;
+                let sequence = u64::from_be_bytes(frame[8..16].try_into().unwrap());
+                log::info!("TCP UDP: first record submitted; sequence={sequence}");
+            }
             Ok(true)
         });
         match result {

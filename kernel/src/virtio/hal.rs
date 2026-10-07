@@ -69,7 +69,11 @@ unsafe impl virtio_drivers::Hal for SvsmHal {
         //       one page at a time.
         assert!(pages == 1);
 
-        let shared_page = SharedBox::<[u8; PAGE_SIZE]>::try_new_zeroed().unwrap();
+        let mut shared_page = SharedBox::<[u8; PAGE_SIZE]>::try_new_zeroed().unwrap();
+        // The allocation was zeroed while private. After clearing the C-bit,
+        // those encrypted zeroes are not zeroes in the shared mapping. VirtQueue
+        // relies on zeroed indices and flags before publishing the DMA addresses.
+        shared_page.nclear(PAGE_SIZE).unwrap();
         let pa = virt_to_phys(shared_page.addr());
         let p = NonNull::<u8>::new(shared_page.addr().as_mut_ptr()).unwrap();
 
