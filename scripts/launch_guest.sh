@@ -32,6 +32,7 @@ SNAPSHOT="on"
 
 STATE_DEVICE=""
 VSOCK_DEVICE=""
+TCP_SHMEM_QMP=""
 VIRTIO=0
 
 while [[ $# -gt 0 ]]; do
@@ -84,6 +85,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --snapshot)
       SNAPSHOT=$2
+      shift
+      shift
+      ;;
+    --tcp-shmem-qmp)
+      TCP_SHMEM_QMP="-qmp unix:$2,server=on,wait=off"
       shift
       shift
       ;;
@@ -203,4 +209,5 @@ $SUDO_CMD \
     $VIRTIO_CONFIG \
     $STATE_DEVICE \
     $VSOCK_DEVICE \
+    $TCP_SHMEM_QMP \
     "$@"

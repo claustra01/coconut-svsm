@@ -11,6 +11,8 @@ pub mod registers;
 #[cfg(feature = "tcp-telemetry")]
 pub mod tcp_event;
 pub mod tcp_log;
+#[cfg(feature = "tcp-log-shmem")]
+pub mod tcp_shmem;
 #[cfg(feature = "tcp-telemetry")]
 pub mod tcp_telemetry;
 
