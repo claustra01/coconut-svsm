@@ -4,7 +4,7 @@
 //
 // Author: Shinya Murakami <sny430@gmail.com>
 
-use crate::address::{Address, VirtAddr};
+use crate::address::VirtAddr;
 use crate::locking::SpinLock;
 use crate::vmm::guest_symbols::{GuestSymbolContext, read_guest_virt_slice, tcp_hashinfo_gva};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -183,6 +183,10 @@ fn try_log_sock(ctx: GuestSymbolContext, bucket_index: u32, sock_ptr: u64) {
 
     let src = saddr.to_be_bytes();
     let dst = daddr.to_be_bytes();
+    #[cfg(feature = "tcp-telemetry")]
+    crate::vmm::tcp_telemetry::enqueue_tcp_event(sock_ptr, state, src, sport, dst, dport);
+    #[cfg(not(feature = "tcp-log-output"))]
+    let _ = (bucket_index, src, sport, dst, dport);
     #[cfg(feature = "tcp-log-output")]
     {
         log::info!(
