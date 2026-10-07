@@ -29,6 +29,15 @@ SVSMのvsock通信と同様に、Coconut QEMUの `x-svsm-virtio-mmio` 対応が�
 このドライバが検出するのは、fw_cfgで通知されるMMIOデバイスだけです。
 専用デバイスをvirtio-net-pciに置き換えることはできません。
 
+SEV-SNPのような機密VMでは、QEMUがvirtioデバイスの `iommu_platform` を有効にし、
+`VIRTIO_F_ACCESS_PLATFORM`（bit 33）の選択を要求します。このドライバは
+`VERSION_1` と、デバイスが提示した場合の `ACCESS_PLATFORM` を選択します。
+DMAには既存のSVSM HALを使い、共有済みのゲスト物理アドレスを渡します。
+初期実装にはbit 33の選択が抜けていたため、この条件では機能の合意に失敗して
+`Unsupported` が返り、SVSM側で `Virtio(InvalidDevice)` のpanicになっていました。
+QEMU側の処理は、[機密VMの既定設定](https://github.com/qemu/qemu/blob/v10.1.0/hw/core/machine.c#L1552-L1568)と
+[virtioの機能検証](https://github.com/qemu/qemu/blob/v10.1.0/hw/virtio/virtio.c#L2071-L2078)で確認できます。
+
 QEMUホストで受信スクリプトを起動します。
 
 ```sh
@@ -67,6 +76,8 @@ TCP走査のタイミング、重複の除外、ゲストLinuxのメモリ配置
 | メッセージ | 確認できること |
 | --- | --- |
 | `TCP UDP: no dedicated virtio-net MMIO device found` | 専用NICを検出できていません。QEMUのMMIO設定と起動引数を確認します。 |
+| `TCP UDP: MMIO=... device_features=...` | MMIOのバージョンと、デバイスが提示した機能ビットです。`Modern` であることを確認します。 |
+| `TCP UDP: device initialization failed: ...` | ドライバ初期化が失敗しています。上の機能ビットとエラーを確認します。 |
 | `TCP UDP: device initialized; waiting for TCP observations` | NICの初期化が完了しています。以後の送信には、ゲストのTCP接続が走査で観測される必要があります。 |
 | `TCP UDP: first record submitted; sequence=...` | 最初の接続レコードを送信キューに登録しています。 |
 | `TCP UDP: first transmit completed by device` | QEMU側が最初の送信ディスクリプタの処理を完了しています。ホストの受信スクリプトへの到達を保証するものではありません。 |
@@ -92,7 +103,9 @@ rustc --edition=2024 --test kernel/src/vmm/tcp_event.rs -o /tmp/tcp-event-tests
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -v
 ```
 
-模擬デバイスを使ったテストでは、キュー内の実際のバイト列と、処理が完了するまでバッファを
-保持することを確認しています。開発環境には実機のSNP VM、QEMUのネットワーク環境、
+模擬デバイスを使ったテストでは、QEMUと同様に `ACCESS_PLATFORM` が未選択なら初期化を
+拒否する条件を設け、修正前は失敗、修正後は初期化が成功することを確認しています。
+キュー内の実際のバイト列と、処理が完了するまでバッファを保持することも確認しています。
+開発環境には実機のSNP VM、QEMUのネットワーク環境、
 提示されたQEMUバイナリがないため、SVSMからホストまでの一連の配送はQEMUホストでの
 実行確認が必要です。

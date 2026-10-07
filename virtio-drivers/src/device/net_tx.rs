@@ -18,6 +18,7 @@ bitflags! {
     #[derive(Clone, Copy, Debug)]
     struct Features: u64 {
         const VERSION_1 = 1 << 32;
+        const ACCESS_PLATFORM = 1 << 33;
     }
 }
 
@@ -51,7 +52,10 @@ impl<H: Hal, T: Transport> VirtIONetTx<H, T> {
         if transport.device_type() != DeviceType::Network {
             return Err(Error::InvalidParam);
         }
-        let features = transport.begin_init(Features::VERSION_1);
+        // All queue and packet memory goes through H's DMA/share methods.
+        // QEMU requires ACCESS_PLATFORM for confidential guests, even when
+        // the MMIO DMA addresses are shared GPAs rather than IOMMU mappings.
+        let features = transport.begin_init(Features::VERSION_1 | Features::ACCESS_PLATFORM);
         if !features.contains(Features::VERSION_1)
             || !transport.get_status().contains(DeviceStatus::FEATURES_OK)
         {
@@ -133,8 +137,7 @@ mod tests {
     use core::ptr::NonNull;
     use std::sync::Mutex;
 
-    #[test]
-    fn retains_packet_until_device_completes() {
+    fn transport(device_features: u64) -> (FakeTransport<()>, Arc<Mutex<State>>) {
         let state = Arc::new(Mutex::new(State {
             queues: vec![QueueStatus::default(), QueueStatus::default()],
             ..Default::default()
@@ -142,10 +145,32 @@ mod tests {
         let transport = FakeTransport::<()> {
             device_type: DeviceType::Network,
             max_queue_size: QUEUE_SIZE as u32,
-            device_features: Features::VERSION_1.bits(),
+            device_features,
             config_space: NonNull::dangling(),
             state: state.clone(),
         };
+        (transport, state)
+    }
+
+    #[test]
+    fn negotiates_platform_dma_when_required() {
+        // QEMU enables iommu_platform for confidential guests. Bit 33 is
+        // mandatory there even though the SVSM MMIO device uses shared GPAs.
+        let offered = (1u64 << 32) | (1u64 << 33);
+        let (transport, state) = transport(offered);
+        let _driver = VirtIONetTx::<FakeHal, _>::new(transport).unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.driver_features, offered);
+        assert!(
+            state
+                .status
+                .contains(DeviceStatus::FEATURES_OK | DeviceStatus::DRIVER_OK)
+        );
+    }
+
+    #[test]
+    fn retains_packet_until_device_completes() {
+        let (transport, state) = transport(Features::VERSION_1.bits());
         let mut driver = VirtIONetTx::<FakeHal, _>::new(transport).unwrap();
         let mut frame = [0x55; 98];
         driver.send(&frame).unwrap();

@@ -9,7 +9,7 @@ use crate::virtio::VirtioError;
 use crate::virtio::hal::SvsmHal;
 use crate::virtio::mmio::MmioSlots;
 use virtio_drivers::device::net_tx::VirtIONetTx;
-use virtio_drivers::transport::{DeviceType, mmio::MmioTransport};
+use virtio_drivers::transport::{DeviceType, Transport, mmio::MmioTransport};
 
 use super::{tcp_telemetry, tcp_udp};
 
@@ -24,10 +24,15 @@ struct Device {
 static DEVICE: SpinLock<Option<Device>> = SpinLock::new(None);
 
 pub fn initialize(slots: &mut MmioSlots) -> Result<(), SvsmError> {
-    let Some(slot) = slots.pop_slot(DeviceType::Network) else {
+    let Some(mut slot) = slots.pop_slot(DeviceType::Network) else {
         log::warn!("TCP UDP: no dedicated virtio-net MMIO device found");
         return Ok(());
     };
+    log::info!(
+        "TCP UDP: MMIO={:?} device_features={:#018x}",
+        slot.transport.version(),
+        slot.transport.read_device_features(),
+    );
     let tx = VirtIONetTx::new(slot.transport).map_err(|error| {
         log::error!("TCP UDP: device initialization failed: {error:?}");
         VirtioError::InvalidDevice

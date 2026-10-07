@@ -54,7 +54,17 @@ impl<C> Transport for FakeTransport<C> {
     }
 
     fn set_status(&mut self, status: DeviceStatus) {
-        self.state.lock().unwrap().status = status;
+        let mut state = self.state.lock().unwrap();
+        // Match QEMU's feature validation for platform DMA: when advertised,
+        // ACCESS_PLATFORM must be accepted before FEATURES_OK can be set.
+        const ACCESS_PLATFORM: u64 = 1 << 33;
+        if status.contains(DeviceStatus::FEATURES_OK)
+            && self.device_features & ACCESS_PLATFORM != 0
+            && state.driver_features & ACCESS_PLATFORM == 0
+        {
+            return;
+        }
+        state.status = status;
     }
 
     fn set_guest_page_size(&mut self, guest_page_size: u32) {
