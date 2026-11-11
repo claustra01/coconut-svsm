@@ -71,7 +71,7 @@ impl LoggedSockCache {
 }
 
 pub fn maybe_log_tcp_connections(ctx: GuestSymbolContext) {
-    let tcp_hashinfo = match tcp_hashinfo_gva() {
+    let tcp_hashinfo = match tcp_hashinfo_gva(ctx) {
         Some(gva) => gva,
         None => return,
     };

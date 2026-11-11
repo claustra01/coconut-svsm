@@ -7,27 +7,14 @@
 use crate::address::{Address, PhysAddr, VirtAddr};
 use crate::cpu::control_regs::{CR0Flags, CR4Flags};
 use crate::cpu::efer::EFERFlags;
-use crate::locking::SpinLock;
 use crate::mm::guestmem::copy_slice_from_guest;
 use crate::mm::pagetable::{PTEntry, PagingMode};
 use crate::types::{PAGE_SIZE, PAGE_SIZE_1G, PAGE_SIZE_2M};
 use core::cmp::min;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use cpuarch::vmsa::VMSA;
 
-const LINUX_BANNER_PREFIX: &[u8] = b"Linux version";
-const LINUX_BANNER_MAX_LEN: usize = 256;
-const LINUX_BANNER_PATTERN_BASE: u64 = 0xffff_ffff_0009_86c0;
-const LINUX_BANNER_PATTERN_STEP: u64 = 1 << 20;
-const LINUX_BANNER_PATTERN_MAX: u16 = 0x0fff;
-pub const TCP_HASHINFO_OFFSET: u64 = 0x011b_1400;
-
-static LINUX_BANNER_SCAN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-static LINUX_BANNER_GVA: AtomicU64 = AtomicU64::new(0);
-static LINUX_BANNER_GPA: AtomicU64 = AtomicU64::new(0);
-static TCP_HASHINFO_GVA: AtomicU64 = AtomicU64::new(0);
-static TCP_HASHINFO_GPA: AtomicU64 = AtomicU64::new(0);
-static LINUX_BANNER_CACHE: SpinLock<BannerCache> = SpinLock::new(BannerCache::new());
+static SYMBOLS_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug)]
 pub struct GuestSymbolContext {
@@ -35,6 +22,7 @@ pub struct GuestSymbolContext {
     cr3: u64,
     cr4: u64,
     efer: u64,
+    lstar: u64,
 }
 
 impl GuestSymbolContext {
@@ -44,73 +32,9 @@ impl GuestSymbolContext {
             cr3: vmsa.cr3,
             cr4: vmsa.cr4,
             efer: vmsa.efer,
+            lstar: vmsa.lstar,
         }
     }
-}
-
-struct BannerCache {
-    bytes: [u8; LINUX_BANNER_MAX_LEN],
-    len: usize,
-}
-
-impl BannerCache {
-    const fn new() -> Self {
-        Self {
-            bytes: [0; LINUX_BANNER_MAX_LEN],
-            len: 0,
-        }
-    }
-
-    fn set(&mut self, src: &[u8]) {
-        let len = min(src.len(), LINUX_BANNER_MAX_LEN);
-        self.bytes[..len].copy_from_slice(&src[..len]);
-        self.len = len;
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct BannerSnapshot {
-    pub banner_gva: u64,
-    pub banner_gpa: u64,
-    pub tcp_hashinfo_gva: u64,
-    pub tcp_hashinfo_gpa: u64,
-    bytes: [u8; LINUX_BANNER_MAX_LEN],
-    len: usize,
-}
-
-impl BannerSnapshot {
-    pub fn banner_str(&self) -> &str {
-        if self.len == 0 {
-            "<unknown>"
-        } else {
-            core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("<non-utf8>")
-        }
-    }
-}
-
-fn is_printable_ascii(byte: u8) -> bool {
-    matches!(byte, 0x20..=0x7e | b'\n' | b'\r' | b'\t')
-}
-
-fn linux_banner_len(buf: &[u8]) -> Option<usize> {
-    if !buf.starts_with(LINUX_BANNER_PREFIX) {
-        return None;
-    }
-
-    let mut len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    if len == 0 {
-        return None;
-    }
-
-    if !buf[..len].iter().all(|&b| is_printable_ascii(b)) {
-        return None;
-    }
-
-    while len > 0 && matches!(buf[len - 1], b'\n' | b'\r') {
-        len -= 1;
-    }
-
-    if len == 0 { None } else { Some(len) }
 }
 
 fn page_table_index(gva: VirtAddr, level: usize) -> usize {
@@ -173,7 +97,7 @@ fn translate_gva(ctx: GuestSymbolContext, gva: VirtAddr) -> Option<PhysAddr> {
     None
 }
 
-fn read_guest_slice(ctx: GuestSymbolContext, gva: VirtAddr, buf: &mut [u8]) -> Option<()> {
+pub fn read_guest_virt_slice(ctx: GuestSymbolContext, gva: VirtAddr, buf: &mut [u8]) -> Option<()> {
     let mut remaining = buf.len();
     let mut offset = 0;
     let mut current_gva = gva;
@@ -191,86 +115,133 @@ fn read_guest_slice(ctx: GuestSymbolContext, gva: VirtAddr, buf: &mut [u8]) -> O
     Some(())
 }
 
-pub fn read_guest_virt_slice(ctx: GuestSymbolContext, gva: VirtAddr, buf: &mut [u8]) -> Option<()> {
-    read_guest_slice(ctx, gva, buf)
-}
-
-pub fn maybe_resolve_linux_banner(ctx: GuestSymbolContext) {
-    if LINUX_BANNER_GVA.load(Ordering::Acquire) != 0 {
-        return;
+/// Resolve against this exit's LSTAR, so an uninitialized vCPU or a reboot
+/// cannot reuse a previously cached address from another guest context.
+pub fn tcp_hashinfo_gva(ctx: GuestSymbolContext) -> Option<VirtAddr> {
+    let cr0 = CR0Flags::from_bits_truncate(ctx.cr0);
+    let efer = EFERFlags::from_bits_truncate(ctx.efer);
+    if !cr0.contains(CR0Flags::PG) || !efer.contains(EFERFlags::LMA | EFERFlags::SCE) {
+        return None;
     }
 
-    if LINUX_BANNER_SCAN_IN_PROGRESS.swap(true, Ordering::AcqRel) {
-        return;
-    }
+    let (reference_slide, tcp_gva) = relocate_tcp_hashinfo(
+        ctx.lstar,
+        ENTRY_SYSCALL_64_REFERENCE,
+        TCP_HASHINFO_REFERENCE,
+    )?;
+    let gva = VirtAddr::from(tcp_gva as usize);
 
-    for idx in 0..=LINUX_BANNER_PATTERN_MAX {
-        let gva_val = LINUX_BANNER_PATTERN_BASE + (u64::from(idx) * LINUX_BANNER_PATTERN_STEP);
-        let gva = VirtAddr::from(gva_val as usize);
-        let Some(gpa) = translate_gva(ctx, gva) else {
-            continue;
-        };
-
-        let mut buf = [0u8; LINUX_BANNER_MAX_LEN];
-        if read_guest_slice(ctx, gva, &mut buf).is_none() {
-            continue;
-        }
-
-        let Some(len) = linux_banner_len(&buf) else {
-            continue;
-        };
-
-        let mut tcp_hashinfo_gva = 0;
-        let mut tcp_hashinfo_gpa = 0;
-        if let Some(tcp_gva_val) = gva_val.checked_add(TCP_HASHINFO_OFFSET) {
-            tcp_hashinfo_gva = tcp_gva_val;
-            if let Some(tcp_gpa) = translate_gva(ctx, VirtAddr::from(tcp_gva_val as usize)) {
-                tcp_hashinfo_gpa = tcp_gpa.bits() as u64;
-            }
-        }
-
-        {
-            let mut cache = LINUX_BANNER_CACHE.lock();
-            cache.set(&buf[..len]);
-        }
-
-        TCP_HASHINFO_GVA.store(tcp_hashinfo_gva, Ordering::Relaxed);
-        TCP_HASHINFO_GPA.store(tcp_hashinfo_gpa, Ordering::Relaxed);
-        LINUX_BANNER_GPA.store(gpa.bits() as u64, Ordering::Relaxed);
-        LINUX_BANNER_GVA.store(gva_val, Ordering::Release);
-
-        let snapshot = banner_snapshot();
+    // A user CR3 with KPTI may not map kernel data. Retry on a later exit
+    // instead of remembering a failed translation or a CR3-specific GPA.
+    let gpa = translate_gva(ctx, gva)?;
+    if !SYMBOLS_LOGGED.swap(true, Ordering::Relaxed) {
         log::info!(
-            "guest symbols: linux_banner_gva={:#x} linux_banner_gpa={:#x} tcp_hashinfo_gva={:#x} tcp_hashinfo_gpa={:#x} linux_banner=\"{}\"",
-            snapshot.banner_gva,
-            snapshot.banner_gpa,
-            snapshot.tcp_hashinfo_gva,
-            snapshot.tcp_hashinfo_gpa,
-            snapshot.banner_str()
+            "guest symbols: lstar={:#x} reference_slide={:+} tcp_hashinfo_gva={:#x} tcp_hashinfo_gpa={:#x}",
+            ctx.lstar,
+            reference_slide,
+            tcp_gva,
+            gpa.bits()
         );
-        break;
     }
-
-    LINUX_BANNER_SCAN_IN_PROGRESS.store(false, Ordering::Release);
+    Some(gva)
 }
 
-pub fn banner_snapshot() -> BannerSnapshot {
-    let cache = LINUX_BANNER_CACHE.lock();
-    BannerSnapshot {
-        banner_gva: LINUX_BANNER_GVA.load(Ordering::Relaxed),
-        banner_gpa: LINUX_BANNER_GPA.load(Ordering::Relaxed),
-        tcp_hashinfo_gva: TCP_HASHINFO_GVA.load(Ordering::Relaxed),
-        tcp_hashinfo_gpa: TCP_HASHINFO_GPA.load(Ordering::Relaxed),
-        bytes: cache.bytes,
-        len: cache.len,
+// Addresses reported from /proc/kallsyms in the same boot of the target guest.
+// Their difference (0x0154_9a40) is invariant under KASLR for this kernel build.
+// These are runtime reference addresses, NOT assumed to be link-time addresses.
+const ENTRY_SYSCALL_64_REFERENCE: u64 = 0xffff_ffff_8220_0080;
+const TCP_HASHINFO_REFERENCE: u64 = 0xffff_ffff_8374_9ac0;
+
+/// Native x86-64 Linux programs LSTAR with entry_SYSCALL_64. Apply its change
+/// from the reference boot to tcp_hashinfo. A later boot can relocate either
+/// above or below the reference, so the displacement must be signed.
+/// The result is relative to the reference boot, not the absolute KASLR slide.
+fn relocate_tcp_hashinfo(lstar: u64, entry: u64, tcp: u64) -> Option<(i64, u64)> {
+    const KERNEL_IMAGE_START: u64 = 0xffff_ffff_8000_0000;
+    if lstar < KERNEL_IMAGE_START || entry < KERNEL_IMAGE_START || tcp < KERNEL_IMAGE_START {
+        return None;
     }
+    let slide = (lstar as i64).checked_sub(entry as i64)?;
+    if slide & (PAGE_SIZE_2M as i64 - 1) != 0 {
+        return None;
+    }
+    let tcp_gva = tcp.checked_add_signed(slide)?;
+    (tcp_gva >= KERNEL_IMAGE_START).then_some((slide, tcp_gva))
 }
 
-pub fn tcp_hashinfo_gva() -> Option<VirtAddr> {
-    let gva = TCP_HASHINFO_GVA.load(Ordering::Acquire);
-    if gva == 0 {
-        None
-    } else {
-        Some(VirtAddr::from(gva as usize))
+#[cfg(test)]
+mod tests {
+    use super::{ENTRY_SYSCALL_64_REFERENCE, TCP_HASHINFO_REFERENCE, relocate_tcp_hashinfo};
+
+    // Synthetic link addresses: these are not a profile for a guest kernel.
+    const ENTRY: u64 = 0xffff_ffff_8100_0100;
+    const TCP: u64 = 0xffff_ffff_8300_0200;
+
+    #[test]
+    fn resolves_with_and_without_reference_displacement() {
+        assert_eq!(relocate_tcp_hashinfo(ENTRY, ENTRY, TCP), Some((0, TCP)));
+        assert_eq!(
+            relocate_tcp_hashinfo(0xffff_ffff_a100_0100, ENTRY, TCP),
+            Some((0x2000_0000, 0xffff_ffff_a300_0200))
+        );
+    }
+
+    #[test]
+    fn resolves_reported_guest_across_reboots() {
+        for (lstar, expected) in [
+            (0xffff_ffff_8220_0080, (0, 0xffff_ffff_8374_9ac0)),
+            (0xffff_ffff_8240_0080, (0x20_0000, 0xffff_ffff_8394_9ac0)),
+            (0xffff_ffff_8200_0080, (-0x20_0000, 0xffff_ffff_8354_9ac0)),
+        ] {
+            assert_eq!(
+                relocate_tcp_hashinfo(lstar, ENTRY_SYSCALL_64_REFERENCE, TCP_HASHINFO_REFERENCE),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_uninitialized_and_non_kernel_lstar() {
+        for lstar in [0, 0x100, 0x7fff_8100_0100, 0xffff_8000_8100_0100] {
+            assert_eq!(relocate_tcp_hashinfo(lstar, ENTRY, TCP), None);
+        }
+    }
+
+    #[test]
+    fn rejects_incompatible_entry_offsets() {
+        for lstar in [ENTRY + 1, ENTRY + 0x1000] {
+            assert_eq!(relocate_tcp_hashinfo(lstar, ENTRY, TCP), None);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_link_addresses_and_overflow() {
+        assert_eq!(relocate_tcp_hashinfo(ENTRY, 0, TCP), None);
+        assert_eq!(relocate_tcp_hashinfo(ENTRY, ENTRY, 0), None);
+        assert_eq!(
+            relocate_tcp_hashinfo(ENTRY - 0x20_0000, ENTRY, 0xffff_ffff_8000_0000),
+            None
+        );
+        assert_eq!(
+            relocate_tcp_hashinfo(ENTRY + 0x20_0000, ENTRY, u64::MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_each_context_without_reusing_a_slide() {
+        for (lstar, expected) in [
+            (
+                0xffff_ffff_8120_0100,
+                Some((0x20_0000, 0xffff_ffff_8320_0200)),
+            ),
+            (0, None),
+            (
+                0xffff_ffff_8140_0100,
+                Some((0x40_0000, 0xffff_ffff_8340_0200)),
+            ),
+        ] {
+            assert_eq!(relocate_tcp_hashinfo(lstar, ENTRY, TCP), expected);
+        }
     }
 }
