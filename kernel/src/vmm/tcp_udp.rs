@@ -5,8 +5,8 @@
 pub const PAYLOAD_SIZE: usize = 56;
 pub const PACKET_SIZE: usize = 14 + 20 + 8 + PAYLOAD_SIZE;
 const SOURCE_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x57];
-const SOURCE_IP: [u8; 4] = [10, 0, 2, 15];
-const HOST_IP: [u8; 4] = [10, 0, 2, 2];
+const SOURCE_IP: [u8; 4] = [192, 168, 77, 1];
+const HOST_IP: [u8; 4] = [192, 168, 77, 2];
 const PORT: u16 = 4050;
 
 fn checksum(bytes: &[u8]) -> u16 {
@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(packet[14], 0x45);
         assert_eq!(u16::from_be_bytes([packet[16], packet[17]]), 84);
         assert_eq!(checksum(&packet[14..34]), 0);
-        assert_eq!(&packet[26..34], &[10, 0, 2, 15, 10, 0, 2, 2]);
+        assert_eq!(&packet[26..34], &[192, 168, 77, 1, 192, 168, 77, 2]);
         assert_eq!(&packet[34..42], &[0x0f, 0xd2, 0x0f, 0xd2, 0, 64, 0, 0]);
         assert_eq!(&packet[42..], &payload);
     }

@@ -44,7 +44,7 @@ pub fn initialize(slots: &mut MmioSlots) -> Result<(), SvsmError> {
         first_submitted: false,
         first_completed: false,
     });
-    log::info!("TCP UDP: 10.0.2.15:4050 -> 10.0.2.2:4050");
+    log::info!("TCP UDP: 192.168.77.1:4050 -> 192.168.77.2:4050");
     log::info!("TCP UDP: device initialized; waiting for TCP observations");
     Ok(())
 }
